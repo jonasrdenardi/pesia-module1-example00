@@ -4,11 +4,83 @@ import { workerEvents } from '../events/constants.js';
 console.log('Model training worker initialized');
 let _globalCtx = {};
 
+// Normalize continuous values (price, age) o 0-1 range
+// Why? Keep all features balanced so no one dominates training
+// Formula: (val - min) / (max - min)
+// Example: price=129.99, minPrice=39.99, maxPrice=199.99 -> (129.99 - 39.99) / (199.99 - 39.99) = 0.5625
+const normalize = (value, min, max) => (value - min) / ((max - min) || 1);
+
+function makeContext(catalog, users) {
+    const ages = users.map(u => u.age);
+    const price = catalog.map(p => p.price);
+
+    const minAge = Math.min(...ages);
+    const maxAge = Math.max(...ages);
+
+    const minPrice = Math.min(...price);
+    const maxPrice = Math.max(...price);
+
+    const colors = [...new Set(catalog.map(p => p.color))];
+    const categories = [...new Set(catalog.map(p => p.category))];
+
+    const colorIndex = Object.entries(
+        categories.map((color, index) => {
+            return [color, index]
+        })
+    )
+
+    const categoryIndex = Object.entries(
+        categories.map((category, index) => {
+            return [category, index]
+        })
+    )
+
+    // Computar a média de idade dos compradores por produto
+    // (ajuda a personalizar)
+    const midAge = (minAge + maxAge) / 2;
+    const ageSums = {};
+    const ageCounts = {};
+
+    users.forEach(user => {
+        user.purchases.forEach(p => {
+            ageSums[p.name] = (ageSums[p.name] || 0) + user.age;
+            ageCounts[p.name] = (ageCounts[p.name] || 0) + 1;
+        })
+    });
+
+    const productAvgAgeNorm = Object.fromEntries(
+        catalog.map(product => {
+            ageSums[product.name] = ageCounts[product.name] ?
+                ageSums[product.name] / ageCounts[product.name] :
+                midAge;
+
+            return [product.name, normalize(ageSums[product.name], minAge, maxAge)]
+        })
+    )
+
+    return {
+        catalog,
+        users,
+        colorIndex,
+        categoryIndex,
+        midAge,
+        maxAge,
+        minPrice,
+        maxPrice,
+        numCategories: categories.length,
+        numColors: colors.length,
+        dimentions: 2 + categories.length + colors.length, // age + price + one-hot categories + one-hot colors
+        productAvgAgeNorm
+    };
+}
 
 async function trainModel({ users }) {
     console.log('Training model with users:', users)
-
     postMessage({ type: workerEvents.progressUpdate, progress: { progress: 50 } });
+    const catalog = await (await fetch('/data/products.json')).json();
+
+    const context = makeContext(catalog, users);
+
     postMessage({
         type: workerEvents.trainingLog,
         epoch: 1,
